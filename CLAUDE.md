@@ -72,6 +72,17 @@ For full day-by-day history of what's been checked and what landed, see `docs/up
 - `NuvioMobile/shared/` = Compose-free Kotlin business logic shared across platforms — this is what upstream ports land in.
 - `NuvioMobile/iosApp/NuvioTV/` = native SwiftUI tvOS frontend.
 
+## Branch hygiene (last full cleanup 2026-09-07)
+
+Both repos were audited and every branch was already merged, so the cleanup was pure deletion. Steady state to keep:
+
+- **Outer repo:** `origin` carries only `main`. Locally, `main` plus whatever `claude/*` branch a live Claude worktree (`.claude/worktrees/*`) is checked out on. When a worktree's session is closed, remove the worktree and its branch once it is an ancestor of `main`. Sweep branches (`claude/kind-hypatia-*`, `claude/optimistic-cray-*`) are deleted after their merge lands, per `docs/beta-feedback-sweep-instructions.md` §6; 20 of them had piled up and were removed 09-07.
+- **Submodule:** local and remote hold only `tvos-shared-extraction` (the fork's branch) and `cmp-rewrite` (the fork's GitHub default branch, a stale mirror of upstream — the daily check reads `upstream/cmp-rewrite` directly, so do not rely on the mirror). Feature branches (`claude/upstream-batchN`, `claude/steven-*`, `claude/feat*`, …) are fast-forwarded into `tvos-shared-extraction` and then deleted locally and on `origin`; 13 remote + 17 local were removed 09-07. The submodule's *tag* list also includes upstream's `0.x` tags fetched from `upstream` — those are not fork tags and must not be pushed to `origin`; the fork's own tags are `tvos-*`.
+- **Never `git worktree add`/`remove` on the submodule.** Its `core.worktree` makes any linked worktree resolve its top level back to `.git/modules/NuvioMobile` (phantom `D` entries, and `remove` could target the git dir). Use a local clone for isolated work and land it with `git fetch <clone> <branch>:<branch>`. To dispose of a stray submodule worktree: `rm -rf` its directory and `.git/modules/NuvioMobile/worktrees/<name>/`, then `git worktree prune`. The last such stray (`trusting-aryabhata-0539ea`, July) was removed 09-07; `NuvioMobile/.claude/worktrees/` should stay empty.
+- **Side clones:** `~/Claude/Projects/NuvioMobile-beta18` (used for the beta.18 and batch-9 work) still exists and sits at the `tvos-shared-extraction` tip; delete it when nothing is running in it. Its `-p1` linked worktree was removed 09-07.
+- **Untracked docs are a smell:** the daily upstream check and the sweeps write `docs/*.md` and CLAUDE.md cites them by name. If `git status` shows an untracked `docs/upstream-port-plan-*.md`, commit it — five were found sitting untracked on 09-07 (08-31, 09-03..09-06).
+- `git gc` on the outer repo occasionally; stray `tmp_obj_*` files under `.git/objects/` are harmless leftovers from interrupted writes.
+
 ## Copy rule (standing, set 2026-09-03)
 
 Every draft of user-facing prose presented to Christian for posting or publishing (Reddit comments and thread blocks, DMs to testers, README/INSTALL edits, release-notes highlights, GitHub issue/PR text, upstream reports, any `docs/comms-*.md`) goes through the SlopMonster loop before it is shown to him:
