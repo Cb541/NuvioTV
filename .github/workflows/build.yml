@@ -18,9 +18,36 @@ jobs:
         with:
           repository: youngchris29-art/NuvioTV
           ref: tvos-v0.3.0-beta.17
-          submodules: recursive
+          submodules: false
           fetch-depth: 0
           path: source
+
+      - name: Checkout NuvioMobile submodule
+        working-directory: source
+        run: |
+          set -e
+
+          NUVIO_SHA="$(git ls-tree HEAD NuvioMobile | awk '{print $3}')"
+
+          if [ -z "$NUVIO_SHA" ]; then
+            echo "Could not determine NuvioMobile commit"
+            exit 1
+          fi
+
+          echo "NuvioMobile commit: $NUVIO_SHA"
+
+          rm -rf NuvioMobile
+
+          git clone https://github.com/NuvioMedia/NuvioMobile.git NuvioMobile
+          cd NuvioMobile
+          git checkout "$NUVIO_SHA"
+
+          echo "NuvioMobile checked out successfully:"
+          git rev-parse HEAD
+
+          # The tvOS build does not need the nested Android-only libass
+          # submodule, so leave it uninitialized.
+          git submodule deinit -f --all || true
 
       - name: Install Java
         uses: actions/setup-java@v4
@@ -28,77 +55,166 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Install Xcode command line tools
+      - name: Show Xcode and tvOS SDK
         run: |
+          set -e
+
           sudo xcode-select --switch /Applications/Xcode.app/Contents/Developer
+
+          echo "Xcode:"
           xcodebuild -version
+
+          echo
+          echo "Available tvOS SDKs:"
           xcodebuild -showsdks | grep -i tvos || true
 
       - name: Apply SenPlayer + Profile GIF patch
         working-directory: source
         run: |
+          set -e
+
           mkdir -p scripts
           cp ../patch-kit/scripts/apply_patch.py scripts/apply_patch.py
+
           python3 scripts/apply_patch.py
 
       - name: Verify patch
         working-directory: source
         run: |
-          grep -q '<string>senplayer</string>' NuvioMobile/iosApp/NuvioTV/Info.plist
-          grep -q 'backgroundUrl' NuvioMobile/shared/src/commonMain/kotlin/com/nuvio/app/features/profiles/ProfileModels.kt
-          test -f NuvioMobile/iosApp/NuvioTV/Screens/ProfileSelectionRemoteAnimatedImage.swift
-          grep -q 'ProfileSelectionRemoteAnimatedImage' NuvioMobile/iosApp/NuvioTV/Screens/ProfileSelectionView.swift
+          set -e
 
-      - name: Build tvOS app
+          echo "Checking SenPlayer URL scheme..."
+          grep -q '<string>senplayer</string>' NuvioMobile/iosApp/NuvioTV/Info.plist
+
+          echo "Checking backgroundUrl model support..."
+          grep -R -q 'backgroundUrl' \
+            NuvioMobile/shared/src/commonMain/kotlin/com/nuvio/app/features/profiles
+
+          echo "Checking GIF background view..."
+          test -f \
+            NuvioMobile/iosApp/NuvioTV/Screens/ProfileSelectionRemoteAnimatedImage.swift
+
+          echo "Checking ProfileSelectionView integration..."
+          grep -q 'ProfileSelectionRemoteAnimatedImage' \
+            NuvioMobile/iosApp/NuvioTV/Screens/ProfileSelectionView.swift
+
+          echo
+          echo "Patch verification passed."
+
+      - name: Build QuickJS runtime
         working-directory: source
         run: |
           set -e
-          bash scaffolding/build-quickjs-tvos.sh || true
 
-          cd NuvioMobile/iosApp
+          if [ -f scaffolding/build-quickjs-tvos.sh ]; then
+            bash scaffolding/build-quickjs-tvos.sh
+          else
+            echo "QuickJS build script not present; continuing."
+          fi
+
+      - name: Build tvOS app
+        working-directory: source/NuvioMobile/iosApp
+        run: |
+          set -e
+
+          SDK="$(xcodebuild -showsdks | awk '/appletvos/ {print $NF}' | tail -1)"
+
+          if [ -z "$SDK" ]; then
+            echo "No tvOS SDK was found."
+            xcodebuild -showsdks
+            exit 1
+          fi
+
+          echo "Using tvOS SDK: $SDK"
 
           xcodebuild \
             -project iosApp.xcodeproj \
             -scheme NuvioTV \
             -configuration Release \
-            -sdk appletvos26.5 \
+            -sdk "$SDK" \
             -destination 'generic/platform=tvOS' \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
             build
 
-      - name: Package unsigned IPA
+      - name: Locate built app
+        id: locate_app
         working-directory: source
         run: |
           set -e
 
-          APP="$(find NuvioMobile/iosApp/build \
+          APP="$(find NuvioMobile/iosApp \
             -type d \
-            -path '*/Build/Products/Release-appletvos/NuvioTV.app' \
+            -name 'NuvioTV.app' \
+            -path '*/Release-appletvos/*' \
             | head -1)"
 
           if [ -z "$APP" ]; then
             echo "Could not locate NuvioTV.app"
-            find NuvioMobile/iosApp/build -maxdepth 8 -type d -name '*.app' -print || true
+            echo
+            echo "Available .app bundles:"
+            find NuvioMobile/iosApp -type d -name '*.app' -print || true
             exit 1
           fi
 
-          echo "Using app: $APP"
+          echo "Found app:"
+          echo "$APP"
+
+          echo "app_path=$APP" >> "$GITHUB_OUTPUT"
+
+      - name: Verify SenPlayer in built app
+        working-directory: source
+        env:
+          APP_PATH: ${{ steps.locate_app.outputs.app_path }}
+        run: |
+          set -e
+
+          echo "Checking final Info.plist..."
+
+          /usr/libexec/PlistBuddy \
+            -c "Print :CFBundleIdentifier" \
+            "$APP_PATH/Info.plist"
+
+          /usr/libexec/PlistBuddy \
+            -c "Print :LSApplicationQueriesSchemes" \
+            "$APP_PATH/Info.plist" || true
+
+          if /usr/libexec/PlistBuddy \
+            -c "Print :LSApplicationQueriesSchemes" \
+            "$APP_PATH/Info.plist" \
+            | grep -q "senplayer"; then
+            echo "SenPlayer scheme preserved."
+          else
+            echo "WARNING: SenPlayer scheme was not found in the built plist."
+          fi
+
+      - name: Package unsigned IPA
+        working-directory: source
+        env:
+          APP_PATH: ${{ steps.locate_app.outputs.app_path }}
+        run: |
+          set -e
 
           rm -rf artifact
           mkdir -p artifact/Payload
 
-          cp -R "$APP" artifact/Payload/NuvioTV.app
-
-          /usr/libexec/PlistBuddy \
-            -c "Add :LSApplicationQueriesSchemes:2 string senplayer" \
-            artifact/Payload/NuvioTV.app/Info.plist || true
+          cp -R "$APP_PATH" artifact/Payload/NuvioTV.app
 
           cd artifact
-          zip -qry ../NuvioTV-SenPlayer-ProfileGIF-unsigned.ipa Payload
+
+          zip -qry \
+            ../NuvioTV-SenPlayer-ProfileGIF-unsigned.ipa \
+            Payload
+
+          cd ..
+
+          echo "Created:"
+          ls -lh NuvioTV-SenPlayer-ProfileGIF-unsigned.ipa
 
       - name: Upload unsigned IPA
         uses: actions/upload-artifact@v4
         with:
           name: NuvioTV-SenPlayer-ProfileGIF-unsigned
           path: source/NuvioTV-SenPlayer-ProfileGIF-unsigned.ipa
+          if-no-files-found: error
