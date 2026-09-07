@@ -39,8 +39,9 @@ def patch_models():
     text = path.read_text(encoding="utf-8")
     original = text
 
-    # Add background_url to NuvioProfile.
+    # Add background_url to both profile-related data classes.
     if "val backgroundUrl: String? = null" not in text:
+
         pattern = re.compile(
             r'(?m)^(\s*)@SerialName\("avatar_url"\)\s+'
             r'val avatarUrl:\s*String\?\s*=\s*null,'
@@ -50,55 +51,51 @@ def patch_models():
 
         if len(matches) < 2:
             fail(
-                "expected NuvioProfile and ProfilePushPayload avatar_url fields"
+                "expected avatar_url fields for NuvioProfile "
+                "and ProfilePushPayload"
             )
 
-        # Insert after the first avatar_url field.
-        first = matches[0]
-        indent = first.group(1)
+        # Work backwards so indexes remain valid.
+        for match in reversed(matches[:2]):
+            indent = match.group(1)
 
-        replacement = (
-            first.group(0)
-            + "\n"
-            + indent
-            + '@SerialName("background_url") '
-              "val backgroundUrl: String? = null,"
-        )
+            replacement = (
+                match.group(0)
+                + "\n"
+                + indent
+                + '@SerialName("background_url") '
+                  "val backgroundUrl: String? = null,"
+            )
 
-        text = (
-            text[:first.start()]
-            + replacement
-            + text[first.end():]
-        )
+            text = (
+                text[:match.start()]
+                + replacement
+                + text[match.end():]
+            )
 
-        # Find the second avatar_url after the first insertion.
-        second_match = re.search(
-            r'(?m)^(\s*)@SerialName\("avatar_url"\)\s+'
-            r'val avatarUrl:\s*String\?\s*=\s*null,',
-            text[first.start() + len(replacement):],
-        )
+    # Shared helper exposed to Swift.
+    if "fun normalizedProfileBackgroundUrl" not in text:
 
-        if not second_match:
-            fail("could not find ProfilePushPayload avatar_url field")
+        helper = r'''
 
-        second_start = first.start() + len(replacement) + second_match.start()
-        second_end = first.start() + len(replacement) + second_match.end()
+fun normalizedProfileBackgroundUrl(url: String?): String? =
+    url?.trim()?.takeIf { it.isValidProfileBackgroundUrl() }
 
-        indent2 = second_match.group(1)
+private fun String.isValidProfileBackgroundUrl(): Boolean {
+    val value = trim()
 
-        replacement2 = (
-            second_match.group(0)
-            + "\n"
-            + indent2
-            + '@SerialName("background_url") '
-              "val backgroundUrl: String? = null,"
-        )
+    if (value.length > 2048) return false
+    if (value.any { it.isWhitespace() }) return false
 
-        text = (
-            text[:second_start]
-            + replacement2
-            + text[second_end:]
-        )
+    return value.startsWith("https://") ||
+        value.startsWith("http://")
+}
+
+fun profileBackgroundImageUrl(profile: NuvioProfile): String? =
+    normalizedProfileBackgroundUrl(profile.backgroundUrl)
+'''
+
+        text = text.rstrip() + helper + "\n"
 
     write_file(path, original, text, "models")
 
@@ -119,90 +116,84 @@ def patch_repository():
     text = path.read_text(encoding="utf-8")
     original = text
 
-    # ------------------------------------------------------------------------
-    # createProfile / updateProfile parameters
-    # ------------------------------------------------------------------------
-
+    # Add backgroundUrl to createProfile/updateProfile.
     for function_name in ("createProfile", "updateProfile"):
 
-        function_match = re.search(
-            rf"(?s)(suspend\s+fun\s+{function_name}\s*\()(.*?)(\)\s*\{{)",
-            text,
+        pattern = re.compile(
+            rf"(?s)"
+            rf"(suspend\s+fun\s+{re.escape(function_name)}\s*\()"
+            rf"(.*?)"
+            rf"(\)\s*\{{)"
         )
 
-        if not function_match:
+        match = pattern.search(text)
+
+        if not match:
             fail(
                 f"could not find repository function {function_name}"
             )
 
-        body = function_match.group(2)
+        body = match.group(2)
 
         if "backgroundUrl:" not in body:
-            avatar_parameter = re.search(
+
+            avatar_match = re.search(
                 r"(\bavatarUrl\s*:\s*String\?\s*=\s*null,)",
                 body,
             )
 
-            if not avatar_parameter:
+            if not avatar_match:
                 fail(
-                    f"could not find avatarUrl parameter in "
-                    f"{function_name}"
+                    f"could not find avatarUrl parameter "
+                    f"in {function_name}"
                 )
 
             new_body = (
-                body[:avatar_parameter.end()]
+                body[:avatar_match.end()]
                 + "\n        backgroundUrl: String? = null,"
-                + body[avatar_parameter.end():]
+                + body[avatar_match.end():]
             )
 
             text = (
-                text[:function_match.start(2)]
+                text[:match.start(2)]
                 + new_body
-                + text[function_match.end(2):]
+                + text[match.end(2):]
             )
 
-    # ------------------------------------------------------------------------
-    # Existing profile -> payload
-    # ------------------------------------------------------------------------
+    # Existing profile -> push payload.
+    if "backgroundUrl = profile.backgroundUrl" not in text:
+        text = text.replace(
+            "avatarUrl = profile.avatarUrl,",
+            "avatarUrl = profile.avatarUrl,\n"
+            "                backgroundUrl = profile.backgroundUrl,",
+        )
 
-    text = text.replace(
-        "avatarUrl = profile.avatarUrl,\n",
-        "avatarUrl = profile.avatarUrl,\n"
-        "                backgroundUrl = profile.backgroundUrl,\n",
-    )
+    # New profile -> push payload.
+    if "backgroundUrl = backgroundUrl" not in text:
+        text = text.replace(
+            "avatarUrl = avatarUrl,",
+            "avatarUrl = avatarUrl,\n"
+            "            backgroundUrl = backgroundUrl,",
+        )
 
-    # ------------------------------------------------------------------------
-    # New profile -> payload
-    # ------------------------------------------------------------------------
-
-    text = text.replace(
-        "avatarUrl = avatarUrl,\n",
-        "avatarUrl = avatarUrl,\n"
-        "            backgroundUrl = backgroundUrl,\n",
-    )
-
-    # ------------------------------------------------------------------------
-    # Local NuvioProfile reconstruction
-    # ------------------------------------------------------------------------
-
-    text = text.replace(
-        "avatarUrl = p.avatarUrl,\n",
-        "avatarUrl = p.avatarUrl,\n"
-        "                backgroundUrl = p.backgroundUrl,\n",
-    )
-
-    # ------------------------------------------------------------------------
-    # Make sure every profile field was actually introduced.
-    # ------------------------------------------------------------------------
+    # Local profile reconstruction.
+    if "backgroundUrl = p.backgroundUrl" not in text:
+        text = text.replace(
+            "avatarUrl = p.avatarUrl,",
+            "avatarUrl = p.avatarUrl,\n"
+            "                backgroundUrl = p.backgroundUrl,",
+        )
 
     if "backgroundUrl" not in text:
-        fail("repository patch made no backgroundUrl changes")
+        fail(
+            "repository patch made no backgroundUrl changes"
+        )
 
     write_file(path, original, text, "repository")
 
 
 # ============================================================================
-# tvOS PROFILE VIEW MODEL
+# tvOS PROFILES VIEW MODEL
 # ============================================================================
 
 def patch_viewmodel():
@@ -214,93 +205,105 @@ def patch_viewmodel():
     text = path.read_text(encoding="utf-8")
     original = text
 
-    # ------------------------------------------------------------------------
-    # createProfile signature
-    # ------------------------------------------------------------------------
-
-    create_match = re.search(
-        r"(?s)(func\s+createProfile\s*\()(.*?)(\n\s*\)\s*\{)",
-        text,
+    # createProfile
+    pattern = re.compile(
+        r"(?s)"
+        r"(func\s+createProfile\s*\()"
+        r"(.*?)"
+        r"(\n\s*\)\s*\{)"
     )
 
-    if not create_match:
-        fail("could not find createProfile in ProfilesViewModel.swift")
+    match = pattern.search(text)
 
-    create_body = create_match.group(2)
-
-    if "backgroundUrl:" not in create_body:
-        avatar_line = re.search(
-            r"(?m)^(\s*)avatarUrl:\s*String\?\s*=\s*nil,",
-            create_body,
+    if not match:
+        fail(
+            "could not find createProfile "
+            "in ProfilesViewModel.swift"
         )
 
-        if not avatar_line:
-            fail("could not find createProfile avatarUrl parameter")
+    body = match.group(2)
 
-        indent = avatar_line.group(1)
+    if "backgroundUrl:" not in body:
+
+        avatar_match = re.search(
+            r"(?m)^(\s*)avatarUrl:\s*String\?\s*=\s*nil,",
+            body,
+        )
+
+        if not avatar_match:
+            fail(
+                "could not find createProfile avatarUrl parameter"
+            )
+
+        indent = avatar_match.group(1)
 
         new_body = (
-            create_body[:avatar_line.end()]
+            body[:avatar_match.end()]
             + "\n"
             + indent
             + "backgroundUrl: String? = nil,"
-            + create_body[avatar_line.end():]
+            + body[avatar_match.end():]
         )
 
         text = (
-            text[:create_match.start(2)]
+            text[:match.start(2)]
             + new_body
-            + text[create_match.end(2):]
+            + text[match.end(2):]
         )
 
-    # ------------------------------------------------------------------------
-    # updateProfile signature
-    # ------------------------------------------------------------------------
-
-    update_match = re.search(
-        r"(?s)(func\s+updateProfile\s*\()(.*?)(\n\s*\)\s*\{)",
-        text,
+    # updateProfile
+    pattern = re.compile(
+        r"(?s)"
+        r"(func\s+updateProfile\s*\()"
+        r"(.*?)"
+        r"(\n\s*\)\s*\{)"
     )
 
-    if not update_match:
-        fail("could not find updateProfile in ProfilesViewModel.swift")
+    match = pattern.search(text)
 
-    update_body = update_match.group(2)
-
-    if "backgroundUrl:" not in update_body:
-        avatar_line = re.search(
-            r"(?m)^(\s*)avatarUrl:\s*String\?\s*=\s*nil,",
-            update_body,
+    if not match:
+        fail(
+            "could not find updateProfile "
+            "in ProfilesViewModel.swift"
         )
 
-        if not avatar_line:
-            fail("could not find updateProfile avatarUrl parameter")
+    body = match.group(2)
 
-        indent = avatar_line.group(1)
+    if "backgroundUrl:" not in body:
+
+        avatar_match = re.search(
+            r"(?m)^(\s*)avatarUrl:\s*String\?\s*=\s*nil,",
+            body,
+        )
+
+        if not avatar_match:
+            fail(
+                "could not find updateProfile avatarUrl parameter"
+            )
+
+        indent = avatar_match.group(1)
 
         new_body = (
-            update_body[:avatar_line.end()]
+            body[:avatar_match.end()]
             + "\n"
             + indent
             + "backgroundUrl: String? = nil,"
-            + update_body[avatar_line.end():]
+            + body[avatar_match.end():]
         )
 
         text = (
-            text[:update_match.start(2)]
+            text[:match.start(2)]
             + new_body
-            + text[update_match.end(2):]
+            + text[match.end(2):]
         )
 
-    # ------------------------------------------------------------------------
-    # Forward backgroundUrl to repository calls.
-    # ------------------------------------------------------------------------
-
-    text = text.replace(
-        "avatarUrl: avatarUrl,\n",
-        "avatarUrl: avatarUrl,\n"
-        "            backgroundUrl: backgroundUrl,\n",
-    )
+    # Forward to repository.
+    if "backgroundUrl: backgroundUrl" not in text:
+        text = text.replace(
+            "avatarUrl: avatarUrl,",
+            "avatarUrl: avatarUrl,\n"
+            "            backgroundUrl: backgroundUrl,",
+        )
 
     write_file(path, original, text, "viewmodel")
 
@@ -319,10 +322,12 @@ def patch_selection_view():
     original = text
 
     # ========================================================================
-    # ProfileSelectionView section
+    # ProfileSelectionView
     # ========================================================================
 
-    selection_start = text.find("struct ProfileSelectionView: View")
+    selection_start = text.find(
+        "struct ProfileSelectionView: View"
+    )
 
     if selection_start < 0:
         fail("could not find ProfileSelectionView")
@@ -333,22 +338,25 @@ def patch_selection_view():
     )
 
     if selection_end < 0:
-        fail("could not determine end of ProfileSelectionView")
+        fail(
+            "could not determine end of ProfileSelectionView"
+        )
 
-    selection = text[selection_start:selection_end]
+    selection = text[
+        selection_start:selection_end
+    ]
 
-    # ------------------------------------------------------------------------
-    # Add background property
-    # ------------------------------------------------------------------------
-
-    if "private var profileSelectionBackgroundURL" not in selection:
+    # Add background property.
+    if "profileSelectionBackgroundURL" not in selection:
 
         body_marker = "    var body: some View {"
 
         body_pos = selection.find(body_marker)
 
         if body_pos < 0:
-            fail("could not find ProfileSelectionView body")
+            fail(
+                "could not find ProfileSelectionView body"
+            )
 
         property_block = """    private var profileSelectionBackgroundURL: String? {
         model.activeProfile?.backgroundUrl
@@ -363,37 +371,51 @@ def patch_selection_view():
             + selection[body_pos:]
         )
 
-    # ------------------------------------------------------------------------
-    # Add remote background inside the selection ZStack.
-    # ------------------------------------------------------------------------
-
+    # Add animated background.
     if "ProfileSelectionRemoteAnimatedImage" not in selection:
 
-        background_marker = (
-            "            Theme.Palette.background.ignoresSafeArea()"
+        marker = (
+            "Theme.Palette.background.ignoresSafeArea()"
         )
 
-        background_pos = selection.find(background_marker)
+        marker_pos = selection.find(marker)
 
-        if background_pos < 0:
+        if marker_pos < 0:
             fail(
-                "could not find ProfileSelectionView theme background"
+                "could not find ProfileSelectionView "
+                "theme background"
             )
 
-        background_code = """            if let backgroundURL = profileSelectionBackgroundURL {
-                ProfileSelectionRemoteAnimatedImage(urlString: backgroundURL)
-                    .ignoresSafeArea()
-            }
+        line_start = selection.rfind(
+            "\n",
+            0,
+            marker_pos,
+        ) + 1
 
-"""
+        indentation = selection[
+            line_start:marker_pos
+        ]
 
-        selection = (
-            selection[:background_pos]
-            + background_code
-            + selection[background_pos:]
+        background = (
+            indentation
+            + "if let backgroundURL = "
+              "profileSelectionBackgroundURL {\n"
+            + indentation
+            + "    ProfileSelectionRemoteAnimatedImage("
+              "urlString: backgroundURL)\n"
+            + indentation
+            + "        .ignoresSafeArea()\n"
+            + indentation
+            + "}\n"
+            + indentation
         )
 
-    # Reassemble main file.
+        selection = (
+            selection[:marker_pos]
+            + background
+            + selection[marker_pos:]
+        )
+
     text = (
         text[:selection_start]
         + selection
@@ -401,10 +423,12 @@ def patch_selection_view():
     )
 
     # ========================================================================
-    # ProfileEditView section
+    # ProfileEditView
     # ========================================================================
 
-    edit_start = text.find("struct ProfileEditView: View")
+    edit_start = text.find(
+        "struct ProfileEditView: View"
+    )
 
     if edit_start < 0:
         fail("could not find ProfileEditView")
@@ -415,17 +439,21 @@ def patch_selection_view():
     )
 
     if edit_end < 0:
-        fail("could not determine end of ProfileEditView")
+        fail(
+            "could not determine end of ProfileEditView"
+        )
 
-    edit = text[edit_start:edit_end]
+    edit = text[
+        edit_start:edit_end
+    ]
 
     # ------------------------------------------------------------------------
-    # Add background URL state
+    # State
     # ------------------------------------------------------------------------
 
     if "@State private var backgroundUrl: String" not in edit:
 
-        marker = "    @State private var avatarId: String?\n"
+        marker = "    @State private var avatarId: String?"
 
         pos = edit.find(marker)
 
@@ -434,22 +462,23 @@ def patch_selection_view():
                 "could not find ProfileEditView avatarId state"
             )
 
+        line_end = edit.find("\n", pos)
+
         edit = (
-            edit[:pos]
-            + marker
+            edit[:line_end + 1]
             + "    @State private var backgroundUrl: String\n"
-            + edit[pos + len(marker):]
+            + edit[line_end + 1:]
         )
 
     # ------------------------------------------------------------------------
-    # Initialize background URL
+    # Initial value
     # ------------------------------------------------------------------------
 
     if "_backgroundUrl = State" not in edit:
 
         marker = (
-            "        _avatarId = State("
-            "initialValue: target.profile?.avatarId)\n"
+            "_avatarId = State("
+            "initialValue: target.profile?.avatarId)"
         )
 
         pos = edit.find(marker)
@@ -459,37 +488,54 @@ def patch_selection_view():
                 "could not find ProfileEditView avatarId initializer"
             )
 
+        line_end = edit.find("\n", pos)
+
         initializer = (
-            marker
-            + '        _backgroundUrl = State('
-              'initialValue: target.profile?.backgroundUrl ?? "")\n'
+            "        _backgroundUrl = State("
+            'initialValue: target.profile?.backgroundUrl ?? "")\n'
         )
 
         edit = (
-            edit[:pos]
+            edit[:line_end + 1]
             + initializer
-            + edit[pos + len(marker):]
+            + edit[line_end + 1:]
         )
 
     # ------------------------------------------------------------------------
-    # Add Custom background URL field
+    # Text field
     # ------------------------------------------------------------------------
 
     if 'TextField("Custom background URL"' not in edit:
 
-        cloud_marker = "// Cloud avatar catalog"
+        name_pos = edit.find(
+            'TextField("Name", text: $name)'
+        )
 
-        cloud_pos = edit.find(cloud_marker)
+        if name_pos < 0:
+            fail(
+                'could not find TextField("Name", text: $name)'
+            )
+
+        cloud_pos = edit.find(
+            "// Cloud avatar catalog",
+            name_pos,
+        )
 
         if cloud_pos < 0:
             fail(
-                "could not find Cloud avatar catalog section"
+                "could not find Cloud avatar catalog "
+                "after Name field"
             )
 
-        # Match the existing indentation.
-        line_start = edit.rfind("\n", 0, cloud_pos) + 1
+        line_start = edit.rfind(
+            "\n",
+            0,
+            cloud_pos,
+        ) + 1
 
-        indentation = edit[line_start:cloud_pos]
+        indentation = edit[
+            line_start:cloud_pos
+        ]
 
         field = (
             indentation
@@ -530,75 +576,106 @@ def patch_selection_view():
         )
 
     # ------------------------------------------------------------------------
-    # Add sanitized background URL before save branches.
+    # Sanitize background URL
     # ------------------------------------------------------------------------
 
     if "let finalBackgroundUrl" not in edit:
 
-        marker = "        if let profile = target.profile {"
+        marker = "if let profile = target.profile {"
 
         pos = edit.find(marker)
 
         if pos < 0:
             fail(
-                "could not find ProfileEditView save() branch"
+                "could not find ProfileEditView save branch"
             )
 
-        sanitizer = """        let trimmedBackgroundUrl =
-            backgroundUrl.trimmingCharacters(in: .whitespacesAndNewlines)
+        line_start = edit.rfind(
+            "\n",
+            0,
+            pos,
+        ) + 1
 
-        let finalBackgroundUrl: String? = {
-            guard !trimmedBackgroundUrl.isEmpty else {
-                return nil
-            }
+        indentation = edit[
+            line_start:pos
+        ]
 
-            guard trimmedBackgroundUrl.count <= 2048 else {
-                return nil
-            }
-
-            guard !trimmedBackgroundUrl.contains(
-                where: { $0.isWhitespace }
-            ) else {
-                return nil
-            }
-
-            guard let url = URL(string: trimmedBackgroundUrl),
-                  let scheme = url.scheme?.lowercased(),
-                  scheme == "http" || scheme == "https" else {
-                return nil
-            }
-
-            return trimmedBackgroundUrl
-        }()
-
-"""
+        sanitizer = (
+            indentation
+            + "let trimmedBackgroundUrl = "
+              "backgroundUrl.trimmingCharacters("
+              ".whitespacesAndNewlines)\n\n"
+            + indentation
+            + "let finalBackgroundUrl: String? = {\n"
+            + indentation
+            + "    guard !trimmedBackgroundUrl.isEmpty "
+              "else { return nil }\n"
+            + indentation
+            + "    guard trimmedBackgroundUrl.count <= 2048 "
+              "else { return nil }\n"
+            + indentation
+            + "    guard !trimmedBackgroundUrl.contains("
+              "where: { $0.isWhitespace }) else {\n"
+            + indentation
+            + "        return nil\n"
+            + indentation
+            + "    }\n"
+            + indentation
+            + "    guard let url = "
+              "URL(string: trimmedBackgroundUrl),\n"
+            + indentation
+            + "          let scheme = "
+              "url.scheme?.lowercased(),\n"
+            + indentation
+            + '          scheme == "http" || '
+              'scheme == "https" else {\n'
+            + indentation
+            + "        return nil\n"
+            + indentation
+            + "    }\n"
+            + indentation
+            + "    return trimmedBackgroundUrl\n"
+            + indentation
+            + "}()\n\n"
+        )
 
         edit = (
-            edit[:pos]
+            edit[:line_start]
             + sanitizer
-            + edit[pos:]
+            + edit[line_start:]
         )
 
     # ------------------------------------------------------------------------
-    # Add backgroundUrl to updateProfile/createProfile calls.
+    # Forward backgroundUrl into create/update calls.
     # ------------------------------------------------------------------------
 
     if "backgroundUrl: finalBackgroundUrl" not in edit:
 
-        edit = edit.replace(
-            "                avatarUrl: finalAvatarUrl\n",
-            "                avatarUrl: finalAvatarUrl,\n"
-            "                backgroundUrl: finalBackgroundUrl\n",
+        plain = (
+            "avatarUrl: finalAvatarUrl\n"
         )
 
-        edit = edit.replace(
-            "                avatarUrl: finalAvatarUrl,\n",
-            "                avatarUrl: finalAvatarUrl,\n"
-            "                backgroundUrl: finalBackgroundUrl,\n",
-            2,
-        )
+        if plain in edit:
+            edit = edit.replace(
+                plain,
+                "avatarUrl: finalAvatarUrl,\n"
+                "                "
+                "backgroundUrl: finalBackgroundUrl\n",
+                2,
+            )
+        else:
+            comma = (
+                "avatarUrl: finalAvatarUrl,\n"
+            )
 
-    # Reassemble edit section.
+            edit = edit.replace(
+                comma,
+                "avatarUrl: finalAvatarUrl,\n"
+                "                "
+                "backgroundUrl: finalBackgroundUrl,\n",
+                2,
+            )
+
     text = (
         text[:edit_start]
         + edit
@@ -614,7 +691,7 @@ def patch_selection_view():
 
 
 # ============================================================================
-# REMOTE GIF/IMAGE BACKGROUND VIEW
+# REMOTE GIF BACKGROUND VIEW
 # ============================================================================
 
 def add_remote_image_file():
@@ -631,10 +708,6 @@ def add_remote_image_file():
 import UIKit
 import ImageIO
 
-/// Full-screen remote background for the profile-selection screen.
-///
-/// Static images are displayed normally.
-/// Multi-frame images, including GIFs, are decoded into an animated UIImage.
 struct ProfileSelectionRemoteAnimatedImage: View {
 
     let urlString: String
@@ -723,7 +796,7 @@ struct ProfileSelectionRemoteAnimatedImage: View {
                 return nil
             }
 
-            // Static PNG/JPEG/etc.
+            // Static image.
             if frameCount == 1,
                let cgImage =
                 CGImageSourceCreateImageAtIndex(
@@ -735,7 +808,7 @@ struct ProfileSelectionRemoteAnimatedImage: View {
                 return UIImage(cgImage: cgImage)
             }
 
-            // Animated GIF / multi-frame image.
+            // Animated image / GIF.
             var frames: [UIImage] = []
             var duration: Double = 0
 
@@ -826,8 +899,9 @@ def patch_plist():
     if not path.exists():
         fail(f"missing {path}")
 
-    text = path.read_text(encoding="utf-8")
-    original = text
+    text = path.read_text(
+        encoding="utf-8"
+    )
 
     if "<string>senplayer</string>" in text:
         print("plist: senplayer already present")
@@ -835,7 +909,8 @@ def patch_plist():
 
     if "<string>outplayer</string>" not in text:
         fail(
-            "could not find outplayer entry needed for SenPlayer support"
+            "could not find outplayer entry needed "
+            "for SenPlayer support"
         )
 
     text = text.replace(
@@ -844,12 +919,12 @@ def patch_plist():
         1,
     )
 
-    write_file(
-        path,
-        original,
+    path.write_text(
         text,
-        "plist",
+        encoding="utf-8",
     )
+
+    print("plist: outplayer -> senplayer")
 
 
 # ============================================================================
@@ -863,7 +938,7 @@ def main():
 
     print()
     print("==============================================")
-    print("Nuvio SenPlayer Profile GIF Background Patch")
+    print(" Nuvio SenPlayer Profile GIF Background Patch")
     print("==============================================")
     print()
 
@@ -876,7 +951,7 @@ def main():
 
     print()
     print("==============================================")
-    print("PROFILE_GIF_SENPLAYER_PATCH_OK")
+    print(" PROFILE_GIF_SENPLAYER_PATCH_OK")
     print("==============================================")
     print()
 
