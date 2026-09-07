@@ -38,7 +38,7 @@ jobs:
 
           rm -rf NuvioMobile
 
-          git clone https://github.com/NuvioMedia/NuvioMobile.git NuvioMobile
+          git clone https://github.com/youngchris29-art/NuvioMobile.git NuvioMobile
           cd NuvioMobile
           git checkout "$NUVIO_SHA"
 
