@@ -148,6 +148,36 @@ Closed three carried items from the 09-06 note in one session: the LOW/mechanica
 - "Original" audio option on a non-English title, entered via Detail, plays the original language (Home continue-watching may fall back if the meta cache is cold — worth separately noting during the pass, not a blocker).
 
 **Carried:**
-- **[TRACKED DRIFT, excluded 2026-09-07]** The 09-06 note's claim that upstream `2a75ad6f`'s Gradle-catalog bump "applies project-wide automatically" was wrong — the fork's `gradle/libs.versions.toml` is pinned at Kotlin 2.3.0 / kotlinx-serialization 1.8.1 / no explicit coroutines version, versus upstream's 2.4.10 / 1.10.0 / 1.10.2. Christian decided 2026-09-07 to exclude the toolchain bump from this batch and track it as drift rather than force it through opportunistically inside an unrelated batch.
+- **[CLOSED 2026-09-07 (evening)]** The Gradle-catalog / Kotlin-toolchain drift noted earlier today (upstream `2a75ad6f`) was ported after all — Christian reversed the exclusion decision. See the "Evening follow-up" subsection below; MERGED at `31d572b4`.
 - **[DEFERRED 2026-09-07]** The Compose-runtime half of upstream `4f79bfe0` (`PlayerScreenRuntimeAudioPreferences.kt`, `PlayerEngine` interface change, Android/iOS-mobile engine implementations, mobile `MPVPlayerBridge.swift`, `OriginalAudioPreferenceTest`) — deferred to a future mobile-parity batch; Android cannot compile in this environment. Marker for later: the `// Fork: retained (upstream deleted in 4f79bfe0)` comment on `findPreferredTrackIndex<T>` in the shared player-track-selection file is the trip wire — once the Compose-runtime half is ported and that function's last composeApp call site is gone, delete the retained function and the marker together.
 - **[Follow-up, spawned as a separate task, not in this batch]** The long-standing `[MPV] API error: option not found` at mpv setup is `vulkan-disable-interop`, an option mpv 0.41 dropped. A diagnostic added this session now names the rejected option when one is refused at setup; actually removing the stale option call is out of scope here.
+
+### Evening follow-up — toolchain bump (`31d572b4`)
+
+Christian reversed the morning's exclusion and asked to match upstream's Kotlin toolchain instead. Built as one commit on `claude/upstream-batch9`: `31d572b4` "build(deps): align the version catalog with upstream (Kotlin 2.4.10, serialization 1.10.0, Compose 1.12) (upstream 2a75ad6f)", rebased on top of `0e6464b6` (the separate parked-feats session's removal of the never-existed `vulkan-disable-interop` option, closing the follow-up noted just above). Merge into `tvos-shared-extraction` + push done by the main session right after — tip `31d572b4`.
+
+**Versions (`gradle/libs.versions.toml`, now byte-identical to upstream `cmp-rewrite`, unchanged upstream since `2a75ad6f`):**
+
+| dependency | before | after |
+|---|---|---|
+| kotlin | 2.3.0 | 2.4.10 |
+| kotlinx-serialization | 1.8.1 | 1.10.0 |
+| kotlinx-coroutines | (implicit) | 1.10.2 pin, + `kotlinx-coroutines-core` alias |
+| composeMultiplatform | 1.11.1 | 1.12.0 |
+| material3 | 1.11.0-alpha07 | 1.12.0-alpha03 |
+| androidx-lifecycle | 2.11.0-beta01 | 2.11.0 |
+| androidx-navigation3 | 1.1.1 | 1.2.0-alpha02 |
+| androidx-savedstate | (new) | 1.4.0, + 2 aliases |
+| compottie | 2.1.0 | 2.3.1 |
+
+Also new: `compose-materialRipple`, `coil-network-cache-control`, `supabase-storage` aliases — added for upstream parity, unused by the fork.
+
+No `build.gradle.kts`, `gradle.properties`, wrapper (9.4.1 both sides), or compiler-flag changes were needed. Upstream's `composeApp/build.gradle.kts` hunks from `2a75ad6f` were deliberately NOT taken — entangled with fork-incompatible restructuring, and nothing in the fork needed them to compile.
+
+quickjs-kt `1.0.5-tvos` klibs in `~/.m2` (built by Kotlin 2.3.20, `abi_version=2.3.0`, `compiler_version=2.3.20`) are consumed by Kotlin 2.4.10 without a rebuild; `scaffolding/build-quickjs-tvos.sh` remains the rebuild path if that ever changes.
+
+**Gates**, all green on the new toolchain: `:shared:compileKotlinTvosSimulatorArm64`, `:shared:jvmTest` 753, `:shared:tvosSimulatorArm64Test` 773, `:composeApp:iosSimulatorArm64Test` 425 (14 min, Compose 1.12 artifacts), NuvioTVTests 179, Debug + Release tvOS simulator builds. A Debug rebuild after the rebase and one Codex static-risk round are being run by the main session (CLEAN — two notes carried: (a) the new `kotlinx-coroutines-core` catalog alias is unused by the fork's build files, so 1.10.2 is not an enforced pin on the shared/tvOS path (resolution stays transitive); (b) Kotlin's klib backward-compatibility guarantee covers ordinary klibs but explicitly excludes cinterop klibs, and quickjs-kt ships both — the green tvOS test link is practical evidence, not a policy guarantee; watch for `IrLinkageError` / incompatible-ABI linker diagnostics the first time the JS plugin runtime is exercised on 2.4.10).
+
+This is the first standalone Kotlin-version bump in the fork's history — Kotlin was set once, in the 2026-03-04 "kmp init" commit.
+
+**Device pass owed:** the batch-9 list above, unchanged, plus: first cold launch on the Apple TV after the toolchain bump (sanity item).
