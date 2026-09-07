@@ -8,12 +8,8 @@ jobs:
     runs-on: macos-26
 
     steps:
-      - name: Checkout build kit
-        uses: actions/checkout@v4
-        with:
-          path: patch-kit
 
-      - name: Checkout exact Beta 17 source
+      - name: Checkout NuvioTV
         uses: actions/checkout@v4
         with:
           repository: youngchris29-art/NuvioTV
@@ -22,110 +18,897 @@ jobs:
           fetch-depth: 0
           path: source
 
-      - name: Checkout NuvioMobile submodule
+      - name: Checkout NuvioMobile
         working-directory: source
         run: |
           set -e
 
-          NUVIO_SHA="$(git ls-tree HEAD NuvioMobile | awk '{print $3}')"
+          SHA="$(git ls-tree HEAD NuvioMobile | awk '{print $3}')"
 
-          if [ -z "$NUVIO_SHA" ]; then
-            echo "Could not determine NuvioMobile commit"
-            exit 1
-          fi
-
-          echo "NuvioMobile commit: $NUVIO_SHA"
+          echo "Required NuvioMobile SHA:"
+          echo "$SHA"
 
           rm -rf NuvioMobile
 
-          git clone https://github.com/youngchris29-art/NuvioMobile.git NuvioMobile
-          cd NuvioMobile
-          git checkout "$NUVIO_SHA"
+          git clone \
+            https://github.com/youngchris29-art/NuvioMobile.git \
+            NuvioMobile
 
-          echo "NuvioMobile checked out successfully:"
+          cd NuvioMobile
+
+          git checkout "$SHA"
+
+          echo "Checked out:"
           git rev-parse HEAD
 
-          # The tvOS build does not need the nested Android-only libass
-          # submodule, so leave it uninitialized.
           git submodule deinit -f --all || true
 
-      - name: Install Java
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
-
-      - name: Show Xcode and tvOS SDK
+      - name: Show exact source revision
+        working-directory: source
         run: |
-          set -e
-
-          sudo xcode-select --switch /Applications/Xcode.app/Contents/Developer
-
-          echo "Xcode:"
-          xcodebuild -version
+          echo "NuvioTV:"
+          git rev-parse HEAD
 
           echo
-          echo "Available tvOS SDKs:"
-          xcodebuild -showsdks | grep -i tvos || true
+          echo "NuvioMobile:"
+          git -C NuvioMobile rev-parse HEAD
 
-      - name: Apply SenPlayer + Profile GIF patch
+      - name: Apply Profile GIF + SenPlayer patch
         working-directory: source
         run: |
           set -e
 
-          mkdir -p scripts
-          cp ../patch-kit/scripts/apply_patch.py scripts/apply_patch.py
+          python3 <<'PY'
+          from pathlib import Path
+          import re
 
-          python3 scripts/apply_patch.py
+          root = Path("NuvioMobile")
+
+          models = root / (
+              "shared/src/commonMain/kotlin/"
+              "com/nuvio/app/features/profiles/"
+              "ProfileModels.kt"
+          )
+
+          repository = root / (
+              "shared/src/commonMain/kotlin/"
+              "com/nuvio/app/features/profiles/"
+              "ProfileRepository.kt"
+          )
+
+          viewmodel = root / (
+              "iosApp/NuvioTV/Screens/"
+              "ProfilesViewModel.swift"
+          )
+
+          profile_view = root / (
+              "iosApp/NuvioTV/Screens/"
+              "ProfileSelectionView.swift"
+          )
+
+          plist = root / "iosApp/NuvioTV/Info.plist"
+
+          remote_view = root / (
+              "iosApp/NuvioTV/Screens/"
+              "ProfileSelectionRemoteAnimatedImage.swift"
+          )
+
+          def die(message):
+              raise SystemExit("ERROR: " + message)
+
+          # ---------------------------------------------------------------
+          # PROFILE MODELS
+          # ---------------------------------------------------------------
+
+          if not models.exists():
+              die(f"Missing {models}")
+
+          text = models.read_text()
+
+          if "background_url" not in text:
+
+              matches = list(re.finditer(
+                  r'(?m)^(\s*)@SerialName\("avatar_url"\)\s+'
+                  r'val avatarUrl:\s*String\?\s*=\s*null,',
+                  text,
+              ))
+
+              if len(matches) < 2:
+                  die(
+                      "Could not find both avatar_url declarations "
+                      "in ProfileModels.kt"
+                  )
+
+              for match in reversed(matches[:2]):
+
+                  indent = match.group(1)
+
+                  replacement = (
+                      match.group(0)
+                      + "\n"
+                      + indent
+                      + '@SerialName("background_url") '
+                        "val backgroundUrl: String? = null,"
+                  )
+
+                  text = (
+                      text[:match.start()]
+                      + replacement
+                      + text[match.end():]
+                  )
+
+              helper = r'''
+
+          fun normalizedProfileBackgroundUrl(url: String?): String? =
+              url?.trim()?.takeIf { value ->
+                  value.length <= 2048 &&
+                  !value.any { it.isWhitespace() } &&
+                  (
+                      value.startsWith("https://") ||
+                      value.startsWith("http://")
+                  )
+              }
+
+          fun profileBackgroundImageUrl(
+              profile: NuvioProfile
+          ): String? =
+              normalizedProfileBackgroundUrl(
+                  profile.backgroundUrl
+              )
+          '''
+
+              text = text.rstrip() + helper + "\n"
+
+              models.write_text(text)
+
+          print("models: patched")
+
+          # ---------------------------------------------------------------
+          # REPOSITORY
+          # ---------------------------------------------------------------
+
+          if not repository.exists():
+              die(f"Missing {repository}")
+
+          text = repository.read_text()
+
+          for name in ("createProfile", "updateProfile"):
+
+              pattern = re.compile(
+                  rf"(?s)"
+                  rf"(suspend\s+fun\s+{name}\s*\()"
+                  rf"(.*?)"
+                  rf"(\)\s*\{{)"
+              )
+
+              match = pattern.search(text)
+
+              if not match:
+                  die(f"Could not find {name} in ProfileRepository.kt")
+
+              body = match.group(2)
+
+              if "backgroundUrl:" not in body:
+
+                  avatar = re.search(
+                      r"(\bavatarUrl\s*:\s*String\?\s*=\s*null,)",
+                      body,
+                  )
+
+                  if not avatar:
+                      die(
+                          f"Could not find avatarUrl parameter "
+                          f"in {name}"
+                      )
+
+                  body = (
+                      body[:avatar.end()]
+                      + "\n        backgroundUrl: String? = null,"
+                      + body[avatar.end():]
+                  )
+
+                  text = (
+                      text[:match.start(2)]
+                      + body
+                      + text[match.end(2):]
+                  )
+
+          text = text.replace(
+              "avatarUrl = profile.avatarUrl,",
+              "avatarUrl = profile.avatarUrl,\n"
+              "                backgroundUrl = profile.backgroundUrl,",
+          )
+
+          text = text.replace(
+              "avatarUrl = avatarUrl,",
+              "avatarUrl = avatarUrl,\n"
+              "            backgroundUrl = backgroundUrl,",
+          )
+
+          text = text.replace(
+              "avatarUrl = p.avatarUrl,",
+              "avatarUrl = p.avatarUrl,\n"
+              "                backgroundUrl = p.backgroundUrl,",
+          )
+
+          repository.write_text(text)
+
+          print("repository: patched")
+
+          # ---------------------------------------------------------------
+          # VIEW MODEL
+          # ---------------------------------------------------------------
+
+          if not viewmodel.exists():
+              die(f"Missing {viewmodel}")
+
+          text = viewmodel.read_text()
+
+          for name in ("createProfile", "updateProfile"):
+
+              pattern = re.compile(
+                  rf"(?s)"
+                  rf"(func\s+{name}\s*\()"
+                  rf"(.*?)"
+                  rf"(\n\s*\)\s*\{{)"
+              )
+
+              match = pattern.search(text)
+
+              if not match:
+                  die(
+                      f"Could not find {name} "
+                      "in ProfilesViewModel.swift"
+                  )
+
+              body = match.group(2)
+
+              if "backgroundUrl:" not in body:
+
+                  avatar = re.search(
+                      r"(?m)^(\s*)avatarUrl:\s*String\?\s*=\s*nil,",
+                      body,
+                  )
+
+                  if not avatar:
+                      die(
+                          f"Could not find avatarUrl parameter "
+                          f"in {name} view model"
+                      )
+
+                  indent = avatar.group(1)
+
+                  body = (
+                      body[:avatar.end()]
+                      + "\n"
+                      + indent
+                      + "backgroundUrl: String? = nil,"
+                      + body[avatar.end():]
+                  )
+
+                  text = (
+                      text[:match.start(2)]
+                      + body
+                      + text[match.end(2):]
+                  )
+
+          text = text.replace(
+              "avatarUrl: avatarUrl,",
+              "avatarUrl: avatarUrl,\n"
+              "            backgroundUrl: backgroundUrl,",
+          )
+
+          viewmodel.write_text(text)
+
+          print("viewmodel: patched")
+
+          # ---------------------------------------------------------------
+          # PROFILE SELECTION VIEW
+          # ---------------------------------------------------------------
+
+          if not profile_view.exists():
+              die(f"Missing {profile_view}")
+
+          text = profile_view.read_text()
+
+          # Locate ProfileSelectionView.
+          selection_start = text.find(
+              "struct ProfileSelectionView: View"
+          )
+
+          if selection_start < 0:
+              die("ProfileSelectionView not found")
+
+          selection_end = text.find(
+              "struct ProfileEditView: View",
+              selection_start,
+          )
+
+          if selection_end < 0:
+              die("ProfileEditView boundary not found")
+
+          selection = text[
+              selection_start:selection_end
+          ]
+
+          # Add background property.
+          if "profileSelectionBackgroundURL" not in selection:
+
+              body_pos = selection.find(
+                  "var body: some View"
+              )
+
+              if body_pos < 0:
+                  die(
+                      "ProfileSelectionView body not found"
+                  )
+
+              property_code = """
+              private var profileSelectionBackgroundURL: String? {
+                  model.activeProfile?.backgroundUrl
+                      ?? model.profiles.first?.backgroundUrl
+              }
+
+          """
+
+              selection = (
+                  selection[:body_pos]
+                  + property_code
+                  + selection[body_pos:]
+              )
+
+          # Add animated background.
+          if (
+              "ProfileSelectionRemoteAnimatedImage"
+              not in selection
+          ):
+
+              bg_marker = (
+                  "Theme.Palette.background.ignoresSafeArea()"
+              )
+
+              bg_pos = selection.find(bg_marker)
+
+              if bg_pos < 0:
+                  die(
+                      "ProfileSelectionView background marker "
+                      "not found"
+                  )
+
+              line_start = selection.rfind(
+                  "\n",
+                  0,
+                  bg_pos,
+              ) + 1
+
+              indent = selection[
+                  line_start:bg_pos
+              ]
+
+              background_code = (
+                  indent
+                  + "if let backgroundURL = "
+                    "profileSelectionBackgroundURL {\n"
+                  + indent
+                  + "    "
+                    "ProfileSelectionRemoteAnimatedImage("
+                    "urlString: backgroundURL)\n"
+                  + indent
+                  + "        .ignoresSafeArea()\n"
+                  + indent
+                  + "}\n"
+              )
+
+              selection = (
+                  selection[:bg_pos]
+                  + background_code
+                  + selection[bg_pos:]
+              )
+
+          text = (
+              text[:selection_start]
+              + selection
+              + text[selection_end:]
+          )
+
+          # ---------------------------------------------------------------
+          # PROFILE EDIT VIEW
+          # ---------------------------------------------------------------
+
+          edit_start = text.find(
+              "struct ProfileEditView: View"
+          )
+
+          if edit_start < 0:
+              die("ProfileEditView not found")
+
+          # Keep everything after it.
+          edit = text[
+              edit_start:
+          ]
+
+          # State.
+          if "@State private var backgroundUrl: String" not in edit:
+
+              marker = (
+                  "@State private var avatarId: String?"
+              )
+
+              pos = edit.find(marker)
+
+              if pos < 0:
+                  die("avatarId state not found")
+
+              end = edit.find("\n", pos)
+
+              edit = (
+                  edit[:end + 1]
+                  + "    @State private var "
+                    "backgroundUrl: String\n"
+                  + edit[end + 1:]
+              )
+
+          # Initialization.
+          if "_backgroundUrl = State" not in edit:
+
+              marker = (
+                  "_avatarId = State("
+                  "initialValue: target.profile?.avatarId)"
+              )
+
+              pos = edit.find(marker)
+
+              if pos < 0:
+                  die("avatarId initializer not found")
+
+              end = edit.find("\n", pos)
+
+              initializer = (
+                  '        _backgroundUrl = State('
+                  'initialValue: target.profile?.backgroundUrl ?? "")\n'
+              )
+
+              edit = (
+                  edit[:end + 1]
+                  + initializer
+                  + edit[end + 1:]
+              )
+
+          # Background URL field.
+          if 'TextField("Custom background URL"' not in edit:
+
+              name_pos = edit.find(
+                  'TextField("Name", text: $name)'
+              )
+
+              if name_pos < 0:
+                  die("Name TextField not found")
+
+              # Find the next TextField/Cloud section boundary.
+              cloud_pos = edit.find(
+                  "// Cloud avatar catalog",
+                  name_pos,
+              )
+
+              if cloud_pos < 0:
+                  # Fall back to the next obvious section.
+                  cloud_pos = edit.find(
+                      "Cloud avatar catalog",
+                      name_pos,
+                  )
+
+              if cloud_pos < 0:
+                  die(
+                      "Cloud avatar catalog section not found"
+                  )
+
+              line_start = edit.rfind(
+                  "\n",
+                  0,
+                  cloud_pos,
+              ) + 1
+
+              indent = edit[
+                  line_start:cloud_pos
+              ]
+
+              field = (
+                  indent
+                  + 'TextField("Custom background URL", '
+                    'text: $backgroundUrl)\n'
+                  + indent
+                  + "    .textFieldStyle(.plain)\n"
+                  + indent
+                  + "    .font(Theme.Font.body)\n"
+                  + indent
+                  + "    .foregroundStyle("
+                    "Theme.Palette.textPrimary)\n"
+                  + indent
+                  + "    .padding(Theme.Spacing.lg)\n"
+                  + indent
+                  + "    .frame(maxWidth: 700)\n"
+                  + indent
+                  + "    .glassEffect(\n"
+                  + indent
+                  + "        .regular,\n"
+                  + indent
+                  + "        in: RoundedRectangle("
+                    "cornerRadius: Theme.Radius.card)\n"
+                  + indent
+                  + "    )\n"
+                  + indent
+                  + "    .accessibilityLabel(\n"
+                  + indent
+                  + '        String(localized: '
+                    '"Profile selection background URL")\n'
+                  + indent
+                  + "    )\n"
+              )
+
+              edit = (
+                  edit[:cloud_pos]
+                  + field
+                  + edit[cloud_pos:]
+              )
+
+          # Sanitization.
+          if "let finalBackgroundUrl" not in edit:
+
+              marker = "if let profile = target.profile {"
+
+              pos = edit.find(marker)
+
+              if pos < 0:
+                  die(
+                      "ProfileEditView save branch not found"
+                  )
+
+              line_start = edit.rfind(
+                  "\n",
+                  0,
+                  pos,
+              ) + 1
+
+              indent = edit[
+                  line_start:pos
+              ]
+
+              sanitizer = (
+                  indent
+                  + "let trimmedBackgroundUrl = "
+                    "backgroundUrl.trimmingCharacters("
+                    ".whitespacesAndNewlines)\n\n"
+                  + indent
+                  + "let finalBackgroundUrl: String? = {\n"
+                  + indent
+                  + "    guard !trimmedBackgroundUrl.isEmpty "
+                    "else { return nil }\n"
+                  + indent
+                  + "    guard trimmedBackgroundUrl.count <= 2048 "
+                    "else { return nil }\n"
+                  + indent
+                  + "    guard !trimmedBackgroundUrl.contains("
+                    "where: { $0.isWhitespace }) else {\n"
+                  + indent
+                  + "        return nil\n"
+                  + indent
+                  + "    }\n"
+                  + indent
+                  + "    guard let url = "
+                    "URL(string: trimmedBackgroundUrl),\n"
+                  + indent
+                  + "          let scheme = "
+                    "url.scheme?.lowercased(),\n"
+                  + indent
+                  + '          scheme == "http" || '
+                    'scheme == "https" else {\n'
+                  + indent
+                  + "        return nil\n"
+                  + indent
+                  + "    }\n"
+                  + indent
+                  + "    return trimmedBackgroundUrl\n"
+                  + indent
+                  + "}()\n\n"
+              )
+
+              edit = (
+                  edit[:line_start]
+                  + sanitizer
+                  + edit[line_start:]
+              )
+
+          # Forward URL.
+          if "backgroundUrl: finalBackgroundUrl" not in edit:
+
+              edit = edit.replace(
+                  "avatarUrl: finalAvatarUrl\n",
+                  "avatarUrl: finalAvatarUrl,\n"
+                  "                "
+                  "backgroundUrl: finalBackgroundUrl\n",
+                  2,
+              )
+
+              edit = edit.replace(
+                  "avatarUrl: finalAvatarUrl,\n",
+                  "avatarUrl: finalAvatarUrl,\n"
+                  "                "
+                  "backgroundUrl: finalBackgroundUrl,\n",
+                  2,
+              )
+
+          text = (
+              text[:edit_start]
+              + edit
+          )
+
+          profile_view.write_text(text)
+
+          print("profile view: patched")
+
+          # ---------------------------------------------------------------
+          # REMOTE GIF VIEW
+          # ---------------------------------------------------------------
+
+          if not remote_view.exists():
+
+              remote_view.write_text(
+r'''import SwiftUI
+import UIKit
+import ImageIO
+
+struct ProfileSelectionRemoteAnimatedImage: View {
+
+    let urlString: String
+
+    @State private var image: UIImage?
+
+    var body: some View {
+        Group {
+            if let image {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFill()
+            } else {
+                Color.clear
+            }
+        }
+        .frame(
+            maxWidth: .infinity,
+            maxHeight: .infinity
+        )
+        .clipped()
+        .overlay(
+            Color.black.opacity(0.34)
+        )
+        .allowsHitTesting(false)
+        .task(id: urlString) {
+            image = await load(urlString)
+        }
+    }
+
+    private func load(
+        _ value: String
+    ) async -> UIImage? {
+
+        let raw = value.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+
+        guard raw.count <= 2048 else {
+            return nil
+        }
+
+        guard !raw.contains(
+            where: { $0.isWhitespace }
+        ) else {
+            return nil
+        }
+
+        guard let url = URL(string: raw) else {
+            return nil
+        }
+
+        guard let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https" else {
+            return nil
+        }
+
+        do {
+
+            let (data, response) =
+                try await URLSession.shared.data(
+                    from: url
+                )
+
+            if let http =
+                response as? HTTPURLResponse {
+
+                guard (200..<300).contains(
+                    http.statusCode
+                ) else {
+                    return nil
+                }
+            }
+
+            guard let source =
+                CGImageSourceCreateWithData(
+                    data as CFData,
+                    nil
+                ) else {
+                return nil
+            }
+
+            let count =
+                CGImageSourceGetCount(source)
+
+            guard count > 0 else {
+                return nil
+            }
+
+            if count == 1,
+               let cg =
+                CGImageSourceCreateImageAtIndex(
+                    source,
+                    0,
+                    nil
+                ) {
+
+                return UIImage(cgImage: cg)
+            }
+
+            var frames: [UIImage] = []
+            var duration: Double = 0
+
+            for index in 0..<count {
+
+                guard let cg =
+                    CGImageSourceCreateImageAtIndex(
+                        source,
+                        index,
+                        nil
+                    ) else {
+                    continue
+                }
+
+                frames.append(
+                    UIImage(cgImage: cg)
+                )
+
+                if let properties =
+                    CGImageSourceCopyPropertiesAtIndex(
+                        source,
+                        index,
+                        nil
+                    ) as? [CFString: Any],
+
+                   let gif =
+                    properties[
+                        kCGImagePropertyGIFDictionary
+                    ] as? [CFString: Any] {
+
+                    let unclamped =
+                        gif[
+                            kCGImagePropertyGIFUnclampedDelayTime
+                        ] as? Double
+
+                    let clamped =
+                        gif[
+                            kCGImagePropertyGIFDelayTime
+                        ] as? Double
+
+                    duration += max(
+                        unclamped ?? clamped ?? 0.1,
+                        0.02
+                    )
+
+                } else {
+                    duration += 0.1
+                }
+            }
+
+            guard !frames.isEmpty else {
+                return nil
+            }
+
+            return UIImage.animatedImage(
+                with: frames,
+                duration: max(duration, 0.1)
+            )
+
+        } catch {
+            return nil
+        }
+    }
+}
+'''
+              )
+
+          print("remote GIF view: ready")
+
+          # ---------------------------------------------------------------
+          # SENPLAYER
+          # ---------------------------------------------------------------
+
+          if not plist.exists():
+              die(f"Missing {plist}")
+
+          plist_text = plist.read_text()
+
+          if "<string>senplayer</string>" not in plist_text:
+
+              if "<string>outplayer</string>" not in plist_text:
+                  die(
+                      "Could not find outplayer URL scheme "
+                      "to preserve SenPlayer support"
+                  )
+
+              plist_text = plist_text.replace(
+                  "<string>outplayer</string>",
+                  "<string>senplayer</string>",
+                  1,
+              )
+
+              plist.write_text(plist_text)
+
+          print("plist: SenPlayer preserved")
+
+          print()
+          print("PROFILE_GIF_SENPLAYER_PATCH_OK")
+          PY
 
       - name: Verify patch
         working-directory: source
         run: |
           set -e
 
-          echo "Checking SenPlayer URL scheme..."
-          grep -q '<string>senplayer</string>' NuvioMobile/iosApp/NuvioTV/Info.plist
+          echo "=== Verifying files ==="
 
-          echo "Checking backgroundUrl model support..."
-          grep -R -q 'backgroundUrl' \
-            NuvioMobile/shared/src/commonMain/kotlin/com/nuvio/app/features/profiles
+          grep -R -q "background_url" \
+            NuvioMobile/shared/src/commonMain/kotlin/com/nuvio/app/features/profiles/ProfileModels.kt
 
-          echo "Checking GIF background view..."
+          grep -q "backgroundUrl" \
+            NuvioMobile/shared/src/commonMain/kotlin/com/nuvio/app/features/profiles/ProfileRepository.kt
+
+          grep -q "backgroundUrl" \
+            NuvioMobile/iosApp/NuvioTV/Screens/ProfilesViewModel.swift
+
+          grep -q "ProfileSelectionRemoteAnimatedImage" \
+            NuvioMobile/iosApp/NuvioTV/Screens/ProfileSelectionView.swift
+
           test -f \
             NuvioMobile/iosApp/NuvioTV/Screens/ProfileSelectionRemoteAnimatedImage.swift
 
-          echo "Checking ProfileSelectionView integration..."
-          grep -q 'ProfileSelectionRemoteAnimatedImage' \
-            NuvioMobile/iosApp/NuvioTV/Screens/ProfileSelectionView.swift
+          grep -q "<string>senplayer</string>" \
+            NuvioMobile/iosApp/NuvioTV/Info.plist
 
           echo
-          echo "Patch verification passed."
+          echo "=== PATCH VERIFICATION PASSED ==="
 
-      - name: Build QuickJS runtime
-        working-directory: source
+      - name: Show Xcode
         run: |
           set -e
 
-          if [ -f scaffolding/build-quickjs-tvos.sh ]; then
-            bash scaffolding/build-quickjs-tvos.sh
-          else
-            echo "QuickJS build script not present; continuing."
-          fi
+          sudo xcode-select \
+            --switch \
+            /Applications/Xcode.app/Contents/Developer
+
+          xcodebuild -version
+
+          echo
+          echo "TVOS SDK:"
+          xcodebuild -showsdks | grep -i tvos
 
       - name: Build tvOS app
         working-directory: source/NuvioMobile/iosApp
         run: |
           set -e
 
-          SDK="$(xcodebuild -showsdks | awk '/appletvos/ {print $NF}' | tail -1)"
+          SDK="$(xcodebuild -showsdks \
+            | awk '/appletvos/ {print $NF}' \
+            | tail -1)"
 
-          if [ -z "$SDK" ]; then
-            echo "No tvOS SDK was found."
-            xcodebuild -showsdks
-            exit 1
-          fi
-
-          echo "Using tvOS SDK: $SDK"
+          echo "Using SDK: $SDK"
 
           xcodebuild \
             -project iosApp.xcodeproj \
@@ -138,8 +921,7 @@ jobs:
             CODE_SIGN_IDENTITY="" \
             build
 
-      - name: Locate built app
-        id: locate_app
+      - name: Package IPA
         working-directory: source
         run: |
           set -e
@@ -151,55 +933,20 @@ jobs:
             | head -1)"
 
           if [ -z "$APP" ]; then
-            echo "Could not locate NuvioTV.app"
-            echo
-            echo "Available .app bundles:"
-            find NuvioMobile/iosApp -type d -name '*.app' -print || true
+            echo "NuvioTV.app not found"
+            find NuvioMobile/iosApp \
+              -type d \
+              -name '*.app' \
+              -print
             exit 1
           fi
 
-          echo "Found app:"
-          echo "$APP"
-
-          echo "app_path=$APP" >> "$GITHUB_OUTPUT"
-
-      - name: Verify SenPlayer in built app
-        working-directory: source
-        env:
-          APP_PATH: ${{ steps.locate_app.outputs.app_path }}
-        run: |
-          set -e
-
-          echo "Checking final Info.plist..."
-
-          /usr/libexec/PlistBuddy \
-            -c "Print :CFBundleIdentifier" \
-            "$APP_PATH/Info.plist"
-
-          /usr/libexec/PlistBuddy \
-            -c "Print :LSApplicationQueriesSchemes" \
-            "$APP_PATH/Info.plist" || true
-
-          if /usr/libexec/PlistBuddy \
-            -c "Print :LSApplicationQueriesSchemes" \
-            "$APP_PATH/Info.plist" \
-            | grep -q "senplayer"; then
-            echo "SenPlayer scheme preserved."
-          else
-            echo "WARNING: SenPlayer scheme was not found in the built plist."
-          fi
-
-      - name: Package unsigned IPA
-        working-directory: source
-        env:
-          APP_PATH: ${{ steps.locate_app.outputs.app_path }}
-        run: |
-          set -e
+          echo "APP: $APP"
 
           rm -rf artifact
           mkdir -p artifact/Payload
 
-          cp -R "$APP_PATH" artifact/Payload/NuvioTV.app
+          cp -R "$APP" artifact/Payload/NuvioTV.app
 
           cd artifact
 
@@ -207,12 +954,7 @@ jobs:
             ../NuvioTV-SenPlayer-ProfileGIF-unsigned.ipa \
             Payload
 
-          cd ..
-
-          echo "Created:"
-          ls -lh NuvioTV-SenPlayer-ProfileGIF-unsigned.ipa
-
-      - name: Upload unsigned IPA
+      - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
           name: NuvioTV-SenPlayer-ProfileGIF-unsigned
