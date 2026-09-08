@@ -47,6 +47,17 @@ jobs:
           chmod +x scaffolding/build-quickjs-tvos.sh
           ./scaffolding/build-quickjs-tvos.sh
 
+      - name: Configure Nuvio backend
+        working-directory: source/NuvioMobile
+        run: |
+          set -e
+
+          cat > local.properties <<EOF
+          NUVIO_SUPABASE_URL=https://api.nuvio.tv
+          EOF
+
+          echo "Created NuvioMobile/local.properties"
+
       - name: Show exact source revision
         working-directory: source
         run: |
