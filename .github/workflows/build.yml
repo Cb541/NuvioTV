@@ -533,7 +533,7 @@ jobs:
               sanitizer = (
                   indent
                   + "let trimmedBackgroundUrl = "
-                    "backgroundUrl.trimmingCharacters("
+                    "backgroundUrl.trimmingCharacters(in: "
                     ".whitespacesAndNewlines)\n\n"
                   + indent
                   + "let finalBackgroundUrl: String? = {\n"
