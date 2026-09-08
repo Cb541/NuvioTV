@@ -52,11 +52,14 @@ jobs:
         run: |
           set -e
 
-          cat > local.properties <<EOF
+          cat > local.properties <<'EOF'
           NUVIO_SUPABASE_URL=https://api.nuvio.tv
+          NUVIO_SUPABASE_KEY=sb_publishable_1Clq8rlTVACkdcZuqr6_AD__xUUC_EN
           EOF
 
           echo "Created NuvioMobile/local.properties"
+          echo "Backend: https://api.nuvio.tv"
+          echo "Publishable key: configured"
 
       - name: Show exact source revision
         working-directory: source
@@ -615,198 +618,173 @@ jobs:
 
               remote_view.write_text(
           r'''import SwiftUI
-          import UIKit
-          import ImageIO
+import UIKit
+import ImageIO
 
-          struct ProfileSelectionRemoteAnimatedImage: View {
+struct ProfileSelectionRemoteAnimatedImage: View {
 
-              let urlString: String
+    let urlString: String
 
-              @State private var image: UIImage?
+    @State private var image: UIImage?
 
-              var body: some View {
+    var body: some View {
+        Group {
+            if let image {
+                AnimatedUIImageView(image: image)
+                    .aspectRatio(contentMode: .fill)
+            } else {
+                Color.clear
+            }
+        }
+        .frame(
+            maxWidth: .infinity,
+            maxHeight: .infinity
+        )
+        .clipped()
+        .overlay(
+            Color.black.opacity(0.34)
+        )
+        .allowsHitTesting(false)
+        .task(id: urlString) {
+            image = await load(urlString)
+        }
+    }
 
-                  Group {
+    private func load(_ value: String) async -> UIImage? {
 
-                      if let image {
+        let raw = value.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
 
-                          Image(uiImage: image)
-                              .resizable()
-                              .scaledToFill()
+        guard raw.count <= 2048 else {
+            return nil
+        }
 
-                      } else {
+        guard !raw.contains(
+            where: { $0.isWhitespace }
+        ) else {
+            return nil
+        }
 
-                          Color.clear
-                      }
-                  }
-                  .frame(
-                      maxWidth: .infinity,
-                      maxHeight: .infinity
-                  )
-                  .clipped()
-                  .overlay(
-                      Color.black.opacity(0.34)
-                  )
-                  .allowsHitTesting(false)
-                  .task(id: urlString) {
+        guard let url = URL(string: raw) else {
+            return nil
+        }
 
-                      image = await load(
-                          urlString
-                      )
-                  }
-              }
+        guard let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https" else {
+            return nil
+        }
 
-              private func load(
-                  _ value: String
-              ) async -> UIImage? {
+        do {
+            let (data, response) = try await URLSession.shared.data(
+                from: url
+            )
 
-                  let raw =
-                      value.trimmingCharacters(
-                          in: .whitespacesAndNewlines
-                      )
+            if let http = response as? HTTPURLResponse,
+               !(200..<300).contains(http.statusCode) {
+                return nil
+            }
 
-                  guard raw.count <= 2048 else {
-                      return nil
-                  }
+            guard let source = CGImageSourceCreateWithData(
+                data as CFData,
+                nil
+            ) else {
+                return nil
+            }
 
-                  guard !raw.contains(
-                      where: { $0.isWhitespace }
-                  ) else {
-                      return nil
-                  }
+            let count = CGImageSourceGetCount(source)
 
-                  guard let url = URL(
-                      string: raw
-                  ) else {
-                      return nil
-                  }
+            guard count > 0 else {
+                return nil
+            }
 
-                  guard let scheme =
-                      url.scheme?.lowercased(),
-                        scheme == "http" ||
-                        scheme == "https" else {
-                      return nil
-                  }
+            if count == 1,
+               let cg = CGImageSourceCreateImageAtIndex(
+                   source,
+                   0,
+                   nil
+               ) {
+                return UIImage(cgImage: cg)
+            }
 
-                  do {
+            var frames: [UIImage] = []
+            var duration: TimeInterval = 0
 
-                      let (data, response) =
-                          try await URLSession.shared.data(
-                              from: url
-                          )
+            for index in 0..<count {
 
-                      if let http =
-                          response as? HTTPURLResponse,
-                         !(200..<300).contains(
-                              http.statusCode
-                          ) {
-                          return nil
-                      }
+                guard let cg = CGImageSourceCreateImageAtIndex(
+                    source,
+                    index,
+                    nil
+                ) else {
+                    continue
+                }
 
-                      guard let source =
-                          CGImageSourceCreateWithData(
-                              data as CFData,
-                              nil
-                          ) else {
-                          return nil
-                      }
+                let frame = UIImage(cgImage: cg)
+                frames.append(frame)
 
-                      let count =
-                          CGImageSourceGetCount(
-                              source
-                          )
+                let properties =
+                    CGImageSourceCopyPropertiesAtIndex(
+                        source,
+                        index,
+                        nil
+                    ) as? [CFString: Any]
 
-                      guard count > 0 else {
-                          return nil
-                      }
+                let gifProperties =
+                    properties?[kCGImagePropertyGIFDictionary]
+                    as? [CFString: Any]
 
-                      if count == 1,
-                         let cg =
-                          CGImageSourceCreateImageAtIndex(
-                              source,
-                              0,
-                              nil
-                          ) {
+                let delay =
+                    (gifProperties?[kCGImagePropertyGIFUnclampedDelayTime]
+                     as? Double)
+                    ?? (gifProperties?[kCGImagePropertyGIFDelayTime]
+                        as? Double)
+                    ?? 0.1
 
-                          return UIImage(
-                              cgImage: cg
-                          )
-                      }
+                duration += max(delay, 0.02)
+            }
 
-                      var frames: [UIImage] = []
-                      var duration: Double = 0
+            guard !frames.isEmpty else {
+                return nil
+            }
 
-                      for index in 0..<count {
+            return UIImage.animatedImage(
+                with: frames,
+                duration: max(duration, 0.1)
+            )
 
-                          guard let cg =
-                              CGImageSourceCreateImageAtIndex(
-                                  source,
-                                  index,
-                                  nil
-                              ) else {
-                              continue
-                          }
+        } catch {
+            return nil
+        }
+    }
+}
 
-                          frames.append(
-                              UIImage(
-                                  cgImage: cg
-                              )
-                          )
+private struct AnimatedUIImageView: UIViewRepresentable {
 
-                          if let properties =
-                              CGImageSourceCopyPropertiesAtIndex(
-                                  source,
-                                  index,
-                                  nil
-                              ) as? [CFString: Any],
+    let image: UIImage
 
-                             let gif =
-                              properties[
-                                  kCGImagePropertyGIFDictionary
-                              ] as? [CFString: Any] {
+    func makeUIView(context: Context) -> UIImageView {
+        let view = UIImageView()
+        view.contentMode = .scaleAspectFill
+        view.clipsToBounds = true
+        view.isUserInteractionEnabled = false
+        return view
+    }
 
-                              let unclamped =
-                                  gif[
-                                      kCGImagePropertyGIFUnclampedDelayTime
-                                  ] as? Double
+    func updateUIView(
+        _ uiView: UIImageView,
+        context: Context
+    ) {
+        uiView.image = image
 
-                              let clamped =
-                                  gif[
-                                      kCGImagePropertyGIFDelayTime
-                                  ] as? Double
-
-                              duration += max(
-                                  unclamped ??
-                                  clamped ??
-                                  0.1,
-                                  0.02
-                              )
-
-                          } else {
-
-                              duration += 0.1
-                          }
-                      }
-
-                      guard !frames.isEmpty else {
-                          return nil
-                      }
-
-                      return UIImage.animatedImage(
-                          with: frames,
-                          duration: max(
-                              duration,
-                              0.1
-                          )
-                      )
-
-                  } catch {
-
-                      return nil
-                  }
-              }
-          }
-          ''',
+        if image.images != nil {
+            uiView.startAnimating()
+        } else {
+            uiView.stopAnimating()
+        }
+    }
+}
+        ''',
                   encoding="utf-8",
               )
 
