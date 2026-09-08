@@ -98,13 +98,13 @@ jobs:
         run: |
           set -e
 
-          grep -q "background_url" \
+          grep -q "profile_background_url" \
             NuvioMobile/shared/src/commonMain/kotlin/com/nuvio/app/features/profiles/ProfileModels.kt
 
-          grep -q "backgroundUrl" \
+          grep -q "profileBackgroundUrl" \
             NuvioMobile/shared/src/commonMain/kotlin/com/nuvio/app/features/profiles/ProfileRepository.kt
 
-          grep -q "backgroundUrl" \
+          grep -q "profileBackgroundUrl" \
             NuvioMobile/iosApp/NuvioTV/Screens/ProfilesViewModel.swift
 
           grep -q "ProfileSelectionRemoteAnimatedImage" \
