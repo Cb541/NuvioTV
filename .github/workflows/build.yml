@@ -75,8 +75,10 @@ jobs:
         working-directory: source/NuvioMobile
         run: |
           set -e
-          tar -xzf ../tools/tvos-profile-files.tar.gz
-          sha256sum -c ../tools/tvos-profile-files.sha256
+          test -f "$GITHUB_WORKSPACE/tools/tvos-profile-files.tar.gz"
+          test -f "$GITHUB_WORKSPACE/tools/tvos-profile-files.sha256"
+          tar -xzf "$GITHUB_WORKSPACE/tools/tvos-profile-files.tar.gz"
+          sha256sum -c "$GITHUB_WORKSPACE/tools/tvos-profile-files.sha256"
           echo "Profile GIF + SenPlayer files applied and verified"
 
       - name: Verify patch
