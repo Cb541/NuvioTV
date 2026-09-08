@@ -38,7 +38,7 @@ jobs:
           echo "Checked out:"
           git rev-parse HEAD
 
-          git submodule deinit -f --all || true
+          git submodule update --init -- MPVKit
 
       - name: Show exact source revision
         working-directory: source
