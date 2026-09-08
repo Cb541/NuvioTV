@@ -40,6 +40,13 @@ jobs:
 
           git submodule update --init -- MPVKit
 
+      - name: Build QuickJS tvOS dependency
+        working-directory: source
+        run: |
+          set -e
+          chmod +x scaffolding/build-quickjs-tvos.sh
+          ./scaffolding/build-quickjs-tvos.sh
+
       - name: Show exact source revision
         working-directory: source
         run: |
