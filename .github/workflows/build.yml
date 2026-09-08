@@ -906,20 +906,20 @@ jobs:
         run: |
           set -e
 
-          APP="$(find NuvioMobile/iosApp \
-            -type d \
-            -name 'NuvioTV.app' \
-            -path '*/Release-appletvos/*' \
-            | head -1)"
+          echo "Searching Xcode DerivedData for NuvioTV.app..."
+
+          APP="$(find "$HOME/Library/Developer/Xcode/DerivedData"             -type d             -name 'NuvioTV.app'             -path '*/Build/Products/Release-appletvos/*'             | head -1)"
 
           if [ -z "$APP" ]; then
-            echo "NuvioTV.app not found."
-            find NuvioMobile/iosApp \
-              -type d \
-              -name '*.app' \
-              -print
+            echo "NuvioTV.app not found in DerivedData."
+            echo
+            echo "Available .app bundles:"
+            find "$HOME/Library/Developer/Xcode/DerivedData"               -type d               -name '*.app'               -print
             exit 1
           fi
+
+          echo "Found app:"
+          echo "$APP"
 
           rm -rf artifact
           mkdir -p artifact/Payload
@@ -928,9 +928,11 @@ jobs:
 
           cd artifact
 
-          zip -qry \
-            ../NuvioTV-SenPlayer-ProfileGIF-unsigned.ipa \
-            Payload
+          zip -qry             ../NuvioTV-SenPlayer-ProfileGIF-unsigned.ipa             Payload
+
+          echo
+          echo "IPA created:"
+          ls -lh ../NuvioTV-SenPlayer-ProfileGIF-unsigned.ipa
 
       - name: Upload IPA
         uses: actions/upload-artifact@v4
